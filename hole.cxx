@@ -23,6 +23,7 @@ struct segment{
   double hole_T;
   double hole_R;
   double ice_y[IRN]; // T/sqrt(r)
+  double ice_t[IRN], ice_u[IRN], ice_r[IRN], ice_h[IRN], ice_z[IRN]; // temperature (C), strain, stress (radial, hoop, z, Pa)
 };
 
 ostream& operator<<(ostream& out, const segment& a){
@@ -70,7 +71,7 @@ public:
   double tt=0;   // time since start
 
   const double dtt=hour/2; // time-delta (s) between printouts
-  const int tti=-1;   // depth slice for bulk ice printout
+  const int tti=150;   // depth slice for bulk ice printout
   double ttl=0;  // time of the last printout
 
   double A;  // m^2 cross-sectional area of the flow region between the hose and hole wall
@@ -159,7 +160,7 @@ public:
     case 3: // Sieder and Tate
       nu=0.027*pow(Re, 0.8)*pow(Pr, 1./3)*pow(mu/mub, 0.14);
       break;
-      // near entrance region, flow it not yet developed
+      // near entrance region, flow is not yet developed
     case 4: // Nusselt L/d: 10 ... 400
       nu=0.036*pow(Re, 0.8)*pow(Pr, 1./3)*pow(DL, 0.055);
       break;
@@ -179,7 +180,7 @@ public:
       nu=1.86*pow(Re*Pr*DL, 1./3)*pow(mub/mu, 0.14);
       break;
     }
-    nu*=1.0; // value of 5.0 was fitted to Upgrade strings (or case 6) with 0.1 roughness
+    nu*=5.0; // value of 5.0 was fitted to Upgrade strings (or case 6 with 0.1 roughness)
     h=max(h_w, nu*k_w/Dh);
   }
 
@@ -222,6 +223,21 @@ public:
     }
   }
 
+  int JR(double r){
+    return min(IRN-2, (int) floor(sqrt(max(0., r)/Ry)*(IRN-1)));
+  }
+
+  double RJ(int j, double r){
+    return max(r, Ry*sq(j/(double) (IRN-1)));
+  }
+
+  double fRJ(double r[], int j1, double R, int j0, double R0){
+    if(j1>=IRN-1) return r[IRN-1];
+    double rl=j0<j1?RJ(j1, R):R0;
+    double rh=RJ(j1+1, R);
+    return rh>rl?(r[j1]*(rh-R)+r[j1+1]*(R-rl))/(rh-rl):r[j1];
+  }
+
   void run(double dt, double vv, double fl, double rt){
     v=vv;
     Vr=fl*6.30902e-5;
@@ -235,7 +251,7 @@ public:
     for(int i=0; i<n; i++) run(dt/n);
   }
 
-  const int pz=2; // parameterization: 1: x=1-R/r; y=T/sqrt(r); 2: x=log(r/R)/log(Ry/R); y=T
+  const int tf=2; // parameterization: 1: x=1-R/r; y=T/sqrt(r); 2: x=log(r/R)/log(Ry/R); y=T
 
   void run(double dt){ // run simulation for time duration dt
     if(DSH<v*dt){
@@ -276,7 +292,11 @@ public:
 	s[i].hole_R=Ri;
 	s[i].hole_T=Ka; if(Ka<=0) cerr<<"Ka="<<Ka<<" Ri="<<Ri<<" tt="<<tt<<" dd="<<dd<<endl;
 	Tinf=temp(depth(i));
-	for(int j=0; j<IRN; j++) s[i].ice_y[j]=j>0?Tinf*(pz==1?sqrt((1-j*dx)/Ri):1):0;
+	for(int j=0; j<IRN; j++){
+	  s[i].ice_y[j]=j>0?Tinf*(tf==1?sqrt((1-j*dx)/Ri):1):0;
+	  s[i].ice_t[j]=RJ(j, Ri)>Ri?Tinf:0;
+	  s[i].ice_u[j]=0, s[i].ice_r[j]=0, s[i].ice_h[j]=0, s[i].ice_z[j]=0;
+	}
       }
     }
 
@@ -350,11 +370,13 @@ public:
       }
       else{
 	double * y = s[i].ice_y;
+	double R0=R, dt1=0, dt2=dt;
 
 	if(R>Rz){
-	  double dt1=dt, dt2=0;
+	  dt1=dt, dt2=0;
+
 	  double dydx=(4*y[1]-3*y[0]-y[2])/(2*dx);
-	  double dTdr=pz==1?dydx/sqrt(R)+y[0]/(2*sqrt(R)):dydx/(R*log(Ry/R));
+	  double dTdr=tf==1?dydx/sqrt(R)+y[0]/(2*sqrt(R)):dydx/(R*log(Ry/R));
 	  double Qnet=Qice+k_i*dTdr;
 
 	  if(Qnet>0){
@@ -384,7 +406,7 @@ public:
 	    double A[IRN-1], B[IRN-1];
 	    A[0]=0; B[0]=y[0];
 
-	    if(pz==1){
+	    if(tf==1){
 	      for(int j=1; j<IRN-1; j++){
 		double xi=1-j*dx, xR=xi/RR, ci=alf*sq(xR);
 		double bj=dt1*ci*sq(xi/dx)/2;
@@ -397,7 +419,7 @@ public:
 		B[j]=(bb+(bj-wj)*B[j-1])/D;
 	      }
 	    }
-	    else if(pz==2){
+	    else if(tf==2){
 	      double LL=log(Ry/RR);
 	      double q=alf*dt1/sq(LL*dx), p=dt1*Rt/(4*RR*LL*dx);
 	      for(int j=1; j<IRN-1; j++){
@@ -414,16 +436,6 @@ public:
 	    for(int j=IRN-2; j>0; j--) y[j]=B[j]+A[j]*y[j+1];
 
 	    R+=Rt*dt1;
-
-	    if(i==tti && ttt>ttl){
-	      ttl=ttt;
-	      for(int i=0; i<IRN-1; i++){
-		double ri, Ti;
-		if(pz==1) ri=RR/(1-i*dx), Ti=y[i]*sqrt(ri);
-		else if(pz==2) ri=RR*pow(Ry/R, i*dx), Ti=y[i];
-		cout<<(ttt/hour)<<" "<<ri<<" "<<Ti<<endl;
-	      }
-	    }
 	  }
 	  if(R<Rz || dt2>0) R=Rz;
 
@@ -434,8 +446,8 @@ public:
 	      cerr<<"A "<<R<<endl;
 	      for(int i=0; i<IRN-1; i++){
 		double ri, Ti;
-		if(pz==1) ri=R/(1-i*dx), Ti=y[i]*sqrt(ri);
-		else if(pz==2) ri=R*pow(Ry/R, i*dx), Ti=y[i];
+		if(tf==1) ri=R/(1-i*dx), Ti=y[i]*sqrt(ri);
+		else if(tf==2) ri=R*pow(Ry/R, i*dx), Ti=y[i];
 		cerr<<ri<<" "<<Ti<<endl;
 	      }
 	    }
@@ -445,8 +457,8 @@ public:
 	    for(int i=0, j=0; i<IRN; i++){
 	      double ri=i*dr;
 	      for(; j<IRN; j++){
-		double rj=j<IRN-1?pz==1?R/(1-j*dx):R*pow(Ry/R, j*dx):Ry;
-		double Tj=j<IRN-1?y[j]*(pz==1?sqrt(rj):1):Tinf;
+		double rj=j<IRN-1?tf==1?R/(1-j*dx):R*pow(Ry/R, j*dx):Ry;
+		double Tj=j<IRN-1?y[j]*(tf==1?sqrt(rj):1):Tinf;
 
 		if(rj>ri || j==IRN-1){
 		  T[i]=(To*(rj-ri)+Tj*(ri-ro))/(rj-ro);
@@ -457,7 +469,6 @@ public:
 	    }
 
 	    for(int i=0; i<IRN; i++) y[i]=T[i];
-	    dt=dt2;
 
 	    if(verbose){
 	      cerr<<"B "<<R<<endl;
@@ -472,7 +483,7 @@ public:
 	if(R==Rz){
 	  // y=T
 	  double A[IRN-1], B[IRN-1];
-	  double q=alf*dt/sq(dr);
+	  double q=alf*dt2/sq(dr);
 	  // y[IRN-1]=Tinf;
 
 	  {
@@ -491,13 +502,178 @@ public:
 	  }
 
 	  for(int j=IRN-2; j>=0; j--) y[j]=B[j]+A[j]*y[j+1];
+	}
+
+	if(true){
+	  double T[IRN], To=0, ro=0;
+
+	  for(int i=0, j=0; i<IRN; i++){
+	    double ri=RJ(i, R);
+	    for(; j<IRN; j++){
+	      double rj, Tj;
+	      if(j<IRN-1){
+		if(R>Rz){
+		  if(tf==1) rj=R/(1-j*dx), Tj=y[j]*sqrt(rj);
+		  else if(tf==2) rj=R*pow(Ry/R, j*dx), Tj=y[j];
+		}
+		else rj=j*dx*Ry, Tj=y[j];
+	      }
+	      else rj=Ry, Tj=Tinf;
+
+	      if(rj>ri || j==IRN-1){
+		T[i]=(To*(rj-ri)+Tj*(ri-ro))/(rj-ro);
+		break;
+	      }
+	      else To=Tj, ro=rj;
+	    }
+	  }
+
+	  double * t = s[i].ice_t;
+	  double * u = s[i].ice_u;
+	  double * r = s[i].ice_r;
+	  double * h = s[i].ice_h;
+	  double * z = s[i].ice_z;
+
+	  const double Yo=9.25e9; // Young's modulus, Pa
+	  const double si=0.33;   // Poisson ratio
+	  const double al=5.5e-6; // Linear expansion coefficient, K^-1
+	  const double be=al*(1+si)/(1-si);
+	  const double ga=(1-2*si)/(2*(1-si));
+	  const double Yp=Yo/(1+si), Ym=Yo/(1-si);
+	  const double dl=si/(1-si);
+	  double cfl=0;
+
+	  // u,r,z,h are given at exactly j except boundary bin,
+	  // where the values at Rj<R are given at R
+
+	  int j0=JR(R0), j1=JR(R);
+	  double P0=r[j0], dP=0, z0=z[j0], h0=h[j0];
+
+	  if(R>R0){
+	    u[j1]=fRJ(u, j1, R, j0, R0);
+	    r[j1]=fRJ(r, j1, R, j0, R0);
+	    z[j1]=fRJ(z, j1, R, j0, R0);
+	    h[j1]=fRJ(h, j1, R, j0, R0);
+	    t[j1]=fRJ(t, j1, R, j0, R0);
+	    dP=(r[j1]-P0)*sq(R)/Yp;
+	    for(int j=j0; j<j1; j++) u[j]=0, r[j]=0, z[j]=0, h[j]=0, t[j]=0;
+	  }
+	  else if(R<R0){
+	    double u0=u[j0];
+	    for(int j=j1; j<j0; j++) u[j]=u0, r[j]=P0, z[j]=P0, h[j]=P0; // t[j]=0;
+	    // z[j0]=P0, h[j0]=P0;
+	  }
+
+	  // u[0]=0, z[0]=-Ym*al*yi, r[0]=z[0]/2, h[0]=z[0]/2; t[0]=T[0];
+	  double sum=0, sum_1=0, sum_2=0;
+	  double Ri, Ti, ti, pz, prh;
+
+	  double du[IRN] = {0};
+
+	  for(int j=j1; j<IRN; j++){
+	    double Rj=RJ(j, R), Tj=T[j], tj=t[j];
+
+	    double se=sq(r[j]-z[j])+sq(z[j]-h[j])+sq(h[j]-r[j]); // 2*sigma_e^2
+	    double sm=(r[j]+z[j]+h[j])/3; // 2*z[j]/3;
+
+	    double BT=2.4e-24; // Pa^-3 s^-1, near 0 C
+	    double bk=8.617333262e-5, Tz=273.15;
+	    double kt=1/(bk*(Tz+T[j]));
+	    switch(1){
+	    case 1: BT=exp(T[j]>-10?-56.152+0.46397/pow(kt-41.907, 2.4276):-20.5468-0.805838*kt);
+	      break;
+	    }
+
+	    BT*=0.75*se*dt;
+
+	    { // for numerical stability (due to variation of BT over the step)
+	      double sc=1.5*BT*Yp; // Maxwell Relaxation Time Criterion
+	      cfl=max(cfl, sc);
+	      const double sx=0.5; // threshold
+	      BT*=sx/(sx+sc);
+	    }
+
+	    double dr=BT*(r[j]-sm);
+	    double dz=BT*(z[j]-sm);
+	    double dh=BT*(h[j]-sm);
+	    double drh=dr-dh;
+
+	    if(j>j1){ // new ice sum_1,2 - between ri and rc is stress-free
+	      double ri=Ri, rc=min(max(R0, Ri), Rj), rj=Rj;
+	      sum += (Ti*(rj+2*ri)+Tj*(2*rj+ri))*(rj-ri)/6 - ti*(rc+ri)*(rc-ri)/2 - (ti*(rj+2*rc)+tj*(2*rj+rc))*(rj-rc)/6;
+	      sum_1 += 0*pz*(rc-ri)*(ri+rc)/2 + (pz*(rj+2*rc)+dz*(2*rj+rc))*(rj-rc)/6;
+	      sum_2 += 0*prh*log(rc/ri) + (rj>rc?drh-prh+log(rj/rc)*(prh*rj-drh*rc)/(rj-rc):0);
+	    }
+
+	    Ri=Rj, Ti=Tj, ti=tj, pz=dz, prh=drh;
+	    t[j]=T[j];
+	    if(j==j0 && Rj<R0) z[j]=P0, h[j]=P0, dr=0, dz=0, dh=0;
+
+	    du[j]=(be*sum+dP)/Rj-ga*(sum_1/Rj+sum_2*Rj);
+
+	    double ez=-Ym*al*(Tj-tj);
+	    r[j]+=Yp*sum_2;
+	    z[j]+=ez+Yp*((sum_2+dr)*dl-dz);
+	    h[j]+=ez+Yp*((sum_2+dr)*dl-dh);
+	  }
+	  for(int j=j1; j<IRN; j++){
+	    double Rj=RJ(j, R);
+
+	    du[j]+=sum_2*(ga*(sq(Rj)-sq(R))-(R>Rz?sq(R):0))/Rj;
+	    double er=Yp*du[j]/Rj;
+	    u[j]+=du[j];
+
+	    r[j]-=sum_2*Yp+er;
+	    z[j]-=sum_2*Yp*dl;
+	    h[j]-=sum_2*Yp*dl-er;
+	  }
+
+	  {
+	    const double Kw=2.2e9; // Bulk modulus of liquid water, Pa
+	    const double eta=1/delta-1; // Volumetric expansion factor of freezing water (~9%)
+
+	    double dr=-Rt*dt1, RR=R0-dr/2;
+
+	    if(true && R>Rz && dr>0 && ttt>100*hour){
+	      // Tait's Equation for pressurized liquid water
+	      double KW=Kw*(1-7*min(0., r[j1]/2.2e9));
+	      double dP=RR*(eta*dr-du[j1])/(1+Yp/(2*KW));
+	      if(i==tti) cerr<<"YP "<<dP<<" "<<j1<<" "<<R0<<" "<<R<<" "<<du[j1]<<" "<<cfl<<endl;
+
+	      for(int j=j1; j<IRN; j++){
+		double Rj=RJ(j, R);
+		double du=dP/Rj, er=Yp*du/Rj;
+		u[j]+=du; if(i==tti) cerr<<Rj<<" "<<du<<" "<<er<<" "<<u[j]<<" "<<r[j]<<endl;
+		r[j]-=er;
+		h[j]+=er;
+	      }
+	    }
+	  }
 
 	  if(i==tti && ttt>ttl){
 	    ttl=ttt;
 	    for(int i=0; i<IRN-1; i++){
-	      double ri=i*dx*Ry, Ti=y[i];
-	      cout<<(ttt/hour)<<" "<<ri<<" "<<Ti<<endl;
+	      double ri, Ti;
+	      if(R>Rz){
+		if(tf==1) ri=R/(1-i*dx), Ti=y[i]*sqrt(ri);
+		else if(tf==2) ri=R*pow(Ry/R, i*dx), Ti=y[i];
+	      }
+	      else ri=i*dx*Ry, Ti=y[i];
+	      double rr=RJ(i, R);
+	      cout<<"S "<<(ttt/hour)<<" "<<ri<<" "<<Ti<<" "<<rr<<" "<<u[i]<<" "<<r[i]<<" "<<h[i]<<" "<<z[i]<<endl;
 	    }
+	  }
+	}
+	else{
+	  ttl=ttt;
+	  for(int i=0; i<IRN-1; i++){
+	    double ri, Ti;
+	    if(R>Rz){
+	      if(tf==1) ri=R/(1-i*dx), Ti=y[i]*sqrt(ri);
+	      else if(tf==2) ri=R*pow(Ry/R, i*dx), Ti=y[i];
+	    }
+	    else ri=i*dx*Ry, Ti=y[i];
+	    //cout<<"S "<<(ttt/hour)<<" "<<ri<<" "<<Ti<<endl;
 	  }
 	}
       }
