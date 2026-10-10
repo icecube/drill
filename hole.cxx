@@ -13,12 +13,12 @@ using namespace std;
 #define HSL DSH // length of surface hose segment
 #define HSN DSN // number of surface hose segments
 
+const double hour=3600;
 const double L=DSH*0;  // extension of nozzle beyond tabulated depth
 const bool only=false; // drill-only, no bulk ice, no hose simulation
 const bool dfrm=true;  // calculate deformations
 const bool strh=true;  // update coordinates after stretch
 const double deo=0.03; // m, compression buffer
-const double hour=3600;
 double dex=0; // max deo needed
 
 struct segment{
@@ -34,7 +34,8 @@ struct segment{
 
 ostream& operator<<(ostream& out, const segment& a){
   double T0=a.ice_y[0];
-  out<<a.hose_T<<" "<<(T0<0?T0:a.hole_T)<<" "<<a.hole_R<<" "<<a.ice_r[a.ice_jr];
+  int j0=a.ice_jr;
+  out<<a.hose_T<<" "<<(T0<0?T0:a.hole_T)<<" "<<a.hole_R<<" "<<a.ice_u[j0]<<" "<<a.ice_r[j0];
   return out;
 }
 
@@ -399,6 +400,7 @@ public:
     }
 
     double res[DSN] = {0};
+    double tos[DSN] = {0};
 
     double U=0; // water flow rate between cells: up(positive) or down(negative)
     for(int i=dhole; i>=0; i--){
@@ -549,7 +551,7 @@ public:
 	double * du = s[i].ice_du;
 	double * ds = s[i].ice_ds;
 
-	if(dfrm && i==tti){
+	if(dfrm){
 	  double T[IRN], To=0, ro=0;
 	  double * t = s[i].ice_t;
 
@@ -867,91 +869,14 @@ public:
 	  {
 	    double dr=Rt*dt1, dP=0;
 
-	    if(R>Rz && ttt>100*hour){
+	    if(R>Rz){
 	      double delta=916.7/999.84; // at 0 C
 	      double eta=1/delta-1; // Volumetric expansion factor of freezing water (~9%)
 	      double Kw=1.96e9-7.15*min(0., r[j1]); // Bulk modulus of liquid water, Pa (Tait's Equation)
-	      dP=-(eta*(R0+dr/2)*dr+R0*du[j1])/(1+Yp/(2*Kw))*sq(R/R0);
-	      cerr<<"YP "<<dP<<" "<<j1<<" "<<R0<<" "<<R<<" "<<du[j1]<<endl;
+	      dP=-(eta*(R0+dr/2)*dr+R0*du[j1])/(1+Yp/(2*Kw));
 	    }
 
-	    res[i]=dP;
-
-	    for(int j=j1; j<IRN; j++){
-	      double Rj=RJ(j, R, u, j1);
-	      double pu=dP/Rj, er=Yp*pu/Rj;
-	      du[j]+=pu;
-	      r[j]-=er;
-	      h[j]+=er;
-	    }
-
-	    {
-	      double vr[IRN];
-	      for(int j=j1; j<IRN; j++){
-		vr[j]=RJ(j, 0, u, j1);
-		if(!isfinite(u[j])){
-		  cerr<<"Bad error: "<<i<<" "<<j<<" "<<j1<<" "<<R<<" "<<vr[j]<<" "<<u[j]<<" "<<r[j]<<endl;
-		  exit(1);
-		}
-	      }
-	      for(int j=j1; j<IRN-1; j++)
-		if(vr[j]>=vr[j+1]) cerr<<"Bin order error: "<<i<<" "<<j<<" "<<j1<<" "<<R<<" "<<vr[j]<<" "<<vr[j+1]<<endl;
-
-	      { // check bin boundaries
-		for(int j=j1; j<IRN; j++){
-		  const double q=0.1;
-		  double v=du[j], w;
-		  int err=0;
-		  if(v<0){
-		    w=j>j1?vr[j-1]-vr[j]:vr[j]-vr[j+1];
-		    if(v<q*w) err=1;
-		  }
-		  else{
-		    w=j<IRN-1?vr[j+1]-vr[j]:vr[j]-vr[j-1];
-		    if(v>q*w) err=2;
-		  }
-		  if(err>0){
-		    cerr<<"Bin boundary error: "<<i<<" "<<j<<" "<<j1<<" "<<err<<" "<<v<<" "<<w<<endl;
-		    v=q*w; // comment out here to use du[j] directly
-		  }
-		  u[j]+=v;
-		}
-		if(u[j1]>dex){
-		  dex=u[j1];
-		  if(dex>deo) cerr<<"Max grid compression buffer exceeded: "<<dex<<" "<<deo<<endl;
-		}
-	      }
-	    }
-
-	    if(R>Rz){
-	      R+=du[j1];
-	      if(R<Rz){
-		R=Rz;
-		postFreeze(i);
-	      }
-	    }
-	  }
-	}
-
-	if(i==tti && ttt>ttl){
-	  ttl=ttt;
-	  for(int j=0; j<IRN; j++){
-	    double rj, Tj;
-	    if(j<IRN-1){
-	      if(R>Rz){
-		if(tf==1) rj=R/(1-j*dx), Tj=y[j]*sqrt(rj);
-		else if(tf==2) rj=R*pow(Ry/R, j*dx), Tj=y[j];
-	      }
-	      else rj=j*dx*Ry, Tj=y[j];
-	    }
-	    else rj=Ry, Tj=Tinf;
-	    if(dfrm){
-	      double rr=RJ(j, R, u, s[i].ice_jr);
-	      cout<<"S "<<(ttt/hour)<<" "<<rj<<" "<<Tj<<" "<<rr<<" "<<u[j]<<" "<<r[j]<<" "<<h[j]<<" "<<z[j]<<" "<<ds[j]<<endl;
-	    }
-	    else{
-	      cout<<"S "<<(ttt/hour)<<" "<<rj<<" "<<Tj<<endl;
-	    }
+	    res[i]=dP, tos[i]=R0;
 	  }
 	}
       }
@@ -968,10 +893,131 @@ public:
       else Tw=0, U=0;
       s[i].hole_T=Tw;
     }
+
+    double dP=0, dR=0;
+    for(int i=dhole, k=i; i>=0; i--){
+      double & R = s[i].hole_R;
+
+      double * y = s[i].ice_y;
+      double * u = s[i].ice_u;
+      double * r = s[i].ice_r;
+      double * h = s[i].ice_h;
+      double * z = s[i].ice_z;
+      double * du = s[i].ice_du;
+      double * ds = s[i].ice_ds;
+
+      int j1=s[i].ice_jr;
+
+      if(dfrm){
+	if(i<k) k=i;
+	if(i==k) dP=0, dR=0;
+	for(; k>=0 && s[k].hole_R>Rz; k--) dP+=res[k], dR+=sq(tos[k]);
+	if(k<0) dP=0, dR=0;
+
+	double pp=dR>0?sq(R)*dP/dR:0;
+
+	for(int j=j1; j<IRN; j++){
+	  double Rj=RJ(j, R, u, j1);
+	  double pu=pp/Rj, er=Yp*pu/Rj;
+	  du[j]+=pu;
+	  r[j]-=er;
+	  h[j]+=er;
+	}
+
+	{
+	  double vr[IRN];
+	  for(int j=j1; j<IRN; j++){
+	    vr[j]=RJ(j, 0, u, j1);
+	    if(!isfinite(u[j])){
+	      cerr<<"Bad error: "<<i<<" "<<k<<" "<<j<<" "<<j1<<" "<<R<<" "<<vr[j]<<" "<<u[j]<<" "<<r[j]<<endl;
+	      exit(1);
+	    }
+	  }
+	  for(int j=j1; j<IRN-1; j++)
+	    if(vr[j]>=vr[j+1]) cerr<<"Bin order error: "<<i<<" "<<k<<" "<<j<<" "<<j1<<" "<<R<<" "<<vr[j]<<" "<<vr[j+1]<<endl;
+
+	  { // check bin boundaries
+	    for(int j=j1; j<IRN; j++){
+	      const double q=0.1;
+	      double v=du[j], w;
+	      int err=0;
+	      if(v<0){
+		w=j>j1?vr[j-1]-vr[j]:vr[j]-vr[j+1];
+		if(v<q*w) err=1;
+	      }
+	      else{
+		w=j<IRN-1?vr[j+1]-vr[j]:vr[j]-vr[j-1];
+		if(v>q*w) err=2;
+	      }
+	      if(err>0){
+		cerr<<"Bin boundary error: "<<i<<" "<<j<<" "<<j1<<" "<<err<<" "<<v<<" "<<w<<endl;
+		v=q*w; // comment out here to use du[j] directly
+	      }
+	      u[j]+=v;
+	    }
+	    if(u[j1]>dex){
+	      dex=u[j1];
+	      if(dex>deo) cerr<<"Max grid compression buffer exceeded: "<<dex<<" "<<deo<<endl;
+	    }
+	  }
+	}
+
+	if(R>Rz){
+	  R+=du[j1];
+	  if(R<Rz){
+	    R=Rz;
+	    postFreeze(i);
+	  }
+	}
+      }
+
+      Tinf=temp(depth(i));
+
+      if(i==tti && ttt>ttl){
+	ttl=ttt;
+	for(int j=0; j<IRN; j++){
+	  double rj, Tj;
+	  if(j<IRN-1){
+	    if(R>Rz){
+	      if(tf==1) rj=R/(1-j*dx), Tj=y[j]*sqrt(rj);
+	      else if(tf==2) rj=R*pow(Ry/R, j*dx), Tj=y[j];
+	    }
+	    else rj=j*dx*Ry, Tj=y[j];
+	  }
+	  else rj=Ry, Tj=Tinf;
+	  if(dfrm){
+	    double rr=RJ(j, R, u, s[i].ice_jr);
+	    cout<<"S "<<(ttt/hour)<<" "<<rj<<" "<<Tj<<" "<<rr<<" "<<u[j]<<" "<<r[j]<<" "<<h[j]<<" "<<z[j]<<" "<<ds[j]<<endl;
+	  }
+	  else{
+	    cout<<"S "<<(ttt/hour)<<" "<<rj<<" "<<Tj<<endl;
+	  }
+	}
+      }
+    }
   }
 
   bool take(int i){
     return s[i].hole_R>=Rz || i>0 && s[i-1].hole_R>=Rz || i<DSN-1 && s[i+1].hole_R>=Rz;
+  }
+
+  double PP(int i, double rr){ // rr = reporting radius
+    segment& a = s[i];
+    double R=a.hole_R;
+    double * r = a.ice_r;
+    int j0=a.ice_jr;
+    if(R<rr){
+      double * u = a.ice_u;
+      int j=JR(rr, u, j0);
+      return fRJ(r, j, rr, R, u);
+    }
+    else return r[j0];
+  }
+
+  void output(double tl, int i){
+    cout<<(tl/hour)<<" "<<depth(i)<<" "<<s[i];
+    for(int k=1; k<=10; k++) cout<<" "<<PP(i, 0.01*k);
+    cout<<endl;
   }
 } a;
 
@@ -992,7 +1038,7 @@ int main(int arg_c, char *arg_a[]){
     if(sscanf(in.c_str(), "%lf %lf %lf %lf", &dt, &v, &fl, &rt)==4){
       a.run(dt, v, fl, rt);
       if(t>tl){
-	for(int i=0; i<DSN; i++) if(a.take(i)) cout<<(tl/hour)<<" "<<a.depth(i)<<" "<<a.s[i]<<endl;
+	for(int i=0; i<DSN; i++) if(a.take(i)) a.output(tl, i);
 	tl+=del;
       }
       t+=dt;
@@ -1005,7 +1051,7 @@ int main(int arg_c, char *arg_a[]){
       if(a.dd<0) v=0, fl=0, rt=0;
       a.run(dt, v, fl, rt); // retrieve the drill
       if(t>tl){
-	for(int i=0; i<DSN; i++) if(a.take(i)) cout<<(tl/hour)<<" "<<a.depth(i)<<" "<<a.s[i]<<endl;
+	for(int i=0; i<DSN; i++) if(a.take(i)) a.output(tl, i);
 	tl+=del;
       }
     }
@@ -1017,7 +1063,7 @@ int main(int arg_c, char *arg_a[]){
       if(a.dd<0) v=0, fl=0, rt=0;
       a.run(dt, v, fl, rt); // retrieve the drill
       if(t>tl){
-	for(int i=0; i<DSN; i++) if(a.take(i)) cout<<(tl/hour)<<" "<<a.depth(i)<<" "<<a.s[i]<<endl;
+	for(int i=0; i<DSN; i++) if(a.take(i)) a.output(tl, i);
 	tl+=del;
       }
     }
