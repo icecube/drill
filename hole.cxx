@@ -18,7 +18,7 @@ const double L=DSH*0;  // extension of nozzle beyond tabulated depth
 const bool only=false; // drill-only, no bulk ice, no hose simulation
 const bool dfrm=true;  // calculate deformations
 const bool strh=true;  // update coordinates after stretch
-const double deo=0.03; // m, compression buffer
+const double deo=0.05; // m, compression buffer
 double dex=0; // max deo needed
 
 struct segment{
@@ -29,13 +29,14 @@ struct segment{
   double ice_y[IRN]; // T/sqrt(r)
   double ice_t[IRN], ice_u[IRN], ice_r[IRN], ice_h[IRN], ice_z[IRN]; // temperature (C), strain, stress (radial, hoop, z, Pa)
   double ice_du[IRN], ice_ds[IRN]; // deviatoric stress
+  double ice_dz[IRN]; // accumulated vertical strain
   int ice_jr; // current hole wall slice
 };
 
 ostream& operator<<(ostream& out, const segment& a){
   double T0=a.ice_y[0];
   int j0=a.ice_jr;
-  out<<a.hose_T<<" "<<(T0<0?T0:a.hole_T)<<" "<<a.hole_R<<" "<<a.ice_u[j0]<<" "<<a.ice_r[j0];
+  out<<a.hose_T<<" "<<(T0<0?T0:a.hole_T)<<" "<<a.hole_R<<" "<<a.ice_u[j0]<<" "<<a.ice_dz[j0]<<" "<<a.ice_r[j0];
   return out;
 }
 
@@ -95,6 +96,7 @@ public:
   const double be=al*(1+si)/(1-si);
   const double ga=(1-2*si)/(2*(1-si));
   const double Yp=Yo/(1+si), Ym=Yo/(1-si);
+  const double Yx=Yp*(1-si)/(1-2*si);
   const double dl=si/(1-si);
 
   double Ttip=80;  // C temperature of water exiting the drill tip
@@ -346,7 +348,8 @@ public:
 	Tinf=temp(depth(i));
 	for(int j=0; j<IRN; j++){
 	  s[i].ice_y[j]=j>0?Tinf*(tf==1?sqrt((1-j*dx)/Ri):1):0;
-	  s[i].ice_u[j]=0, s[i].ice_r[j]=0, s[i].ice_h[j]=0, s[i].ice_z[j]=0, s[i].ice_du[i]=0, s[i].ice_ds[i]=0;
+	  s[i].ice_u[j]=0, s[i].ice_r[j]=0, s[i].ice_h[j]=0, s[i].ice_z[j]=0;
+	  s[i].ice_du[i]=0, s[i].ice_ds[i]=0; s[i].ice_dz[i]=0;
 	  s[i].ice_t[j]=RJ(j, Ri, s[i].ice_u, 0)>Ri?Tinf:0;
 	}
 	s[i].ice_jr=JR(Ri, s[i].ice_u);
@@ -894,6 +897,87 @@ public:
       s[i].hole_T=Tw;
     }
 
+    if(dhole>1){ // vertical exchange (extrusion) approximation
+      double ez[DSN][IRN]={0};
+
+      for(int n=dhole, k; n>=0; n=k-1){
+	// k=-1;
+	k=n; while(k>=0 && s[k].hole_R==Rz) k--;
+	if(n-k>3){
+
+	  for(int i=n; i>k; i--){
+	    double & R = s[i].hole_R;
+
+	    double * u = s[i].ice_u;
+	    double * z = s[i].ice_z;
+	    double * dz = s[i].ice_dz;
+
+	    int j1=s[i].ice_jr;
+
+	    double rA[IRN]={0}, rB[IRN]={0}, rC[IRN]={0}, rD[IRN]={0};
+	    double rcp[IRN]={0}, rdp[IRN]={0};
+	    double ezs[IRN]={0};
+
+	    for(int j=IRN-1; j>=j1; j--){
+	      double Rj=RJ(j, R, u, j1);
+
+	      if(j == j1) { // Centerline/Core Interface: Flat slope Neumann boundary
+		double h = RJ(j+1, R, u, j1) - Rj;
+		rA[j]=0.0; rB[j]=-2.0/sq(h); rC[j]=2.0/sq(h); rD[j]=0.0;
+	      }
+	      else if(j == IRN-1) { // Far Field Boundary: Strain dies out to 0
+		rA[j]=0.0; rB[j]=1.0; rC[j]=0.0; rD[j]=0.0;
+	      }
+	      else { // Interior Radial Nodes
+		double Rl=RJ(j-1, R, u, j1);
+		double Rh=RJ(j+1, R, u, j1);
+
+		double zm=PP(2, i, Rj);
+		double zu=PP(2, i>k+1?i-1:k+2, Rj);
+		double zd=PP(2, i<n?i+1:n-1, Rj);
+		double d2z=(zu-2*zm+zd)/sq(DSH);
+
+		double h1=Rj-Rl, h2=Rh-Rj;
+
+		// Standard non-uniform cylindrical Laplacian stencils
+		rA[j] = 2.0 / (h1 * (h1 + h2)) - 1.0 / (2.0 * Rj * h1);
+		rC[j] = 2.0 / (h2 * (h1 + h2)) + 1.0 / (2.0 * Rj * h2);
+		rB[j] = -(rA[j] + rC[j]);
+            
+		// The forcing driving force is the vertical pressure curvature
+		rD[j] = -d2z; 
+	      }
+	    }
+
+	    rcp[j1] = rC[j1]/rB[j1]; rdp[j1] = rD[j1]/rB[j1];
+	    for(int j=j1+1; j<IRN; j++){
+	      double den = rB[j] - rA[j]*rcp[j-1];
+	      if(fabs(den) > 0){
+		rcp[j] = rC[j]/den;
+		rdp[j] = (rD[j] - rA[j]*rdp[j-1])/den;
+	      } else { rcp[j]=0.0; rdp[j]=rdp[j-1]; }
+	    }
+	    ezs[IRN-1] = rdp[IRN-1];
+	    for(int j=IRN-2; j>=j1; j--) ezs[j] = rdp[j] - rcp[j]*ezs[j+1];
+	    for(int j=IRN-1; j>=j1; j--) ez[i][j]=ezs[j]*0.05;
+	  }
+
+	  for(int i=n; i>k; i--){
+	    double * z = s[i].ice_z;
+	    double * dz = s[i].ice_dz;
+
+	    int j1=s[i].ice_jr;
+
+	    for(int j=IRN-1; j>=j1; j--){
+	      double ezs=ez[i][j];
+	      dz[j]+=ezs*2/Yp;
+	      z[j]+=ezs/ga;
+	    }
+	  }
+	}
+      }
+    }
+
     double dP=0, dR=0;
     for(int i=dhole, k=i; i>=0; i--){
       double & R = s[i].hole_R;
@@ -1001,22 +1085,22 @@ public:
     return s[i].hole_R>=Rz || i>0 && s[i-1].hole_R>=Rz || i<DSN-1 && s[i+1].hole_R>=Rz;
   }
 
-  double PP(int i, double rr){ // rr = reporting radius
+  double PP(int w, int i, double rr){ // rr = reporting radius
     segment& a = s[i];
     double R=a.hole_R;
-    double * r = a.ice_r;
     int j0=a.ice_jr;
-    if(R<rr){
+    if(rr<R) return a.ice_r[j0];
+    else{
+      double * r = w==1 ? a.ice_r : a.ice_z;
       double * u = a.ice_u;
       int j=JR(rr, u, j0);
       return fRJ(r, j, rr, R, u);
     }
-    else return r[j0];
   }
 
   void output(double tl, int i){
     cout<<(tl/hour)<<" "<<depth(i)<<" "<<s[i];
-    for(int k=1; k<=10; k++) cout<<" "<<PP(i, 0.01*k);
+    for(int k=1; k<=10; k++) cout<<" "<<PP(1, i, 0.01*k);
     cout<<endl;
   }
 } a;
